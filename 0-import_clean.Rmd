@@ -1,0 +1,490 @@
+---
+title: "Import et nettoyage"
+author: "Mohamed Maftah (mohamed.maftah@polymtl.ca) & Mehdi Miah (mehdi.miah@gmail.com)"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  html_document:
+    df_print: kable
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+---
+
+**Descriptif** : ouvre le fichier d'origine qui contient toutes les données et filtre sur la catégorie 'Electronics'
+
+# Setup
+
+```{r setup, message = FALSE, warning = FALSE}
+
+# Suppression des variables
+rm(list = ls())
+
+# Chargement des librairies
+library(data.table) #pour fread
+library(knitr) #pour le notebook
+library(stringr)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+```
+
+# Ouverture du fichier
+
+
+```{r, message = FALSE}
+# Eléments considérés comme NA
+na_strings = c(NA, '', '.', ' ', '?')
+
+# Dataset au complet
+full_dataset = fread("./data/input/train.tsv", 
+                     stringsAsFactors = FALSE, data.table = FALSE, 
+                     sep = "\t", encoding = "UTF-8", na.strings = na_strings)
+```
+
+```{r}
+head(full_dataset)
+```
+
+```{r}
+str(full_dataset)
+```
+
+Expliquons les données : chaque instance correspond à un produit, identifié par la variable **train_id**. Ce produit est nommé dans **name**, son état (neuf, d'occasion ou très abimé) est indiqué par **item_condition_id**. De plus, ce produit appartient à des catégories (hiérarchie crée par Mercari) présentés dans **category_name**. Lorsqu'une marque est identifiable, elle est mentionnée dans **brand_name**. Enfin, le prix de vente est indiqué dans **price** ainsi que les frais de port dans **shipping**. En dernier lieu, une description textuelle complète l'article par **item_description**.
+
+Il est à noté que Kaggle a supprimé toute mention d'un prix dans les noms et descriptions des articles : ces mentions ont été remplacées par des "[rm]".
+
+
+# Filtre sur la catégorie *Electronics*
+
+On ne conserve que les produits dans la catégorie *Electronics*. L'information est comprise dans la variable **category_name** dont il faut séparer les sous-catégories.
+
+Première question : combien de niveau de catégorie existe-il ? A première vue, on dirait 3.
+
+```{r}
+full_dataset$category_name %>% str_count("/") %>% as.factor() %>% summary()
+```
+Il s'avère qu'il y a des produits qui n'ont aucune catégorie, soit 3, 4, ou 5 (en effet, le nombre indiqué dans le code est le nombre de séparateur).
+
+Créons donc 5 colonnes : de **cat1** à **cat5**. Lorsque la donnée est manquante, elle prendra la valeur NA.
+
+```{r}
+full_dataset = full_dataset %>%
+  separate(category_name, c("cat1", "cat2", "cat3", "cat4", "cat5"), sep = "/", remove = TRUE)
+```
+
+Visualisons le résultat : 
+
+```{r}
+head(full_dataset)
+```
+
+Désormais, nous sommes en mesure de sélectionner les produits en lien avec l'électronique.
+Mais avant cela, calculons quelques statistiques sur l'ensemble des données.
+
+Deuxième question : quels sont les autres catégories et quels sont leur volume ?
+
+```{r}
+# Proportions d'articles par cat1
+table(full_dataset$cat1) %>% prop.table() %>% sort(decreasing = TRUE)
+
+# Dataframe avec le nombre d'articles par catégorie 1
+n_articles_cat1 = full_dataset %>%
+  group_by(cat1) %>%
+  summarise(effectif = n()) %>%
+  ungroup()
+
+# Ordonne les catégories pour avoir du plus grand au plus petit
+n_articles_cat1$cat1 = factor(n_articles_cat1$cat1, 
+                              levels = n_articles_cat1$cat1[order(n_articles_cat1$effectif)]) 
+
+# Graphique en barre
+ggplot(n_articles_cat1, aes(x = cat1, y = effectif)) +
+  geom_bar(stat = 'identity') + 
+  labs(title = "Nombre d'articles par catégorie 1",
+       x = "catégorie 1",
+       y = "nombre d'articles") + 
+  scale_y_continuous(labels = scales::comma) + 
+  coord_flip() + 
+  theme_bw()
+
+# Nombre d'articles au total
+cat(sprintf("Nombre total d'articles : %.0f", nrow(full_dataset)))
+
+# Nombre d'articles en électroniques
+cat(sprintf("Nombre d'articles en électronique : %.0f", 
+        sum(full_dataset$cat1 == "Electronics", na.rm = TRUE)))
+```
+
+Ainsi les produits électroniques représentent 8.3% des articles de la base de données, soit près de 123 000 éléments.
+
+Mesurons l'écart-type des prix au sein de chaque catégorie 1.
+
+```{r}
+sd_price_cat1 = full_dataset %>%
+  group_by(cat1) %>%
+  summarise(min_price = min(price),
+            max_price = max(price),
+            sd_price = sd(price)) %>%
+  ungroup() %>%
+  arrange(-sd_price)
+
+sd_price_cat1
+```
+
+La catégorie *Electronics* est celui où la variance des prix est la plus forte. Ainsi, il semblerait qu'elle soit donc la catégorie offrant le plus de difficulté, au sens de la pénalité et du risque encouru.
+
+# Etude sur les produits électroniques
+
+## Obtention des données 
+
+```{r}
+dataset = full_dataset %>%
+  filter(cat1 == "Electronics")  %>%
+  select(-cat1, -cat4, -cat5) #cat1 est unique dans ce cas ; cat4 et cat5 sont très souvent manquant
+```
+
+## Traitement préliminaire des données
+
+Cette partie est importante dans le traitement du problème. En effet, à partir des résultats obtenus ci-dessous, il sera possible de préciser le périmètre de travail, de gérer les valeurs manquantes, de regrouper certaines modalités rares et de vérifier la cohérence des données.
+
+### Données manquantes
+
+Vérifions la part de données manquantes : 
+
+```{r}
+# Comptage de données manquantes par variable
+colSums(is.na(dataset)) %>% sort()
+```
+
+Traitons les variables impactées : 
+
+- 1 observation n'a pas de nom : nous la laissons telle quelle ; 
+- 10 observations ne contiennent pas de description : nous les traitons en les remplaçants par l'indicateur "No description yet" ; 
+- 62629 observations n'ont pas de marque : a priori, les produits tels que les accessoires n'ont pas de marque. Ainsi, l'absence de donnée concernant la marque est en soit une information qu'il convient de conserver. Pour cela, nous remplaçons les valeurs manquantes par "brand_missing".
+
+Regardons de plus près la dizaine d'observations avec soit un nom soit une description manquante : 
+
+```{r}
+obs_with_missing_brand_or_description = dataset %>%
+  filter(is.na(name) | is.na(item_description))
+
+obs_with_missing_brand_or_description
+```
+
+
+
+```{r}
+# Lorsque la marque est manquante, on met une valeur par défaut
+dataset$brand_name[is.na(dataset$brand_name)] = "brand_missing"
+
+# Création d'une variable binaire qui permet de considérer l'effet de ne pas mettre de marque, ou bien d'un produit sans marque
+dataset$is_brand_missing = dataset$brand_name == "brand_missing" #boolean
+```
+
+Normalement, lorsque la description est manquante, Kaggle mettait "No description yet"
+
+```{r}
+# Nombre de produits explicitement sans description
+n_description_missing = sum(dataset$item_description == "No description yet", na.rm = TRUE)
+
+cat(sprintf("Il y a %.0f articles sans description et référencés tel quels.\n", 
+            n_description_missing))
+```
+
+
+
+```{r}
+# Remplacement des NA dans les descriptions par un marqueur
+dataset$item_description[is.na(dataset$item_description)] = "No description yet"
+
+# Vérification
+n_description_missing = sum(dataset$item_description == "No description yet")
+
+cat(sprintf("Désormais, il y a %.0f articles sans description et référencés tel quels.\n", 
+            n_description_missing))
+```
+
+Après lecture des spécifications de Kaggle, lorsque le prix était indiqué dans le nom ou dans la description, il était systématiquement remplacé par "[rm]". Supprimons ces mentions.
+
+```{r}
+# Nombre de fois où "[rm]" apparait
+## NB : dans "\\[rm\\]", le premier '\' transforme le second '\' en caractère qui est reconnu dans un caractère spécial
+## En savoir plus : https://stackoverflow.com/questions/10294284/remove-all-special-characters-from-a-string-in-r
+n_rm_name = grepl(pattern = "\\[rm\\]", dataset$name) %>% sum()
+n_rm_description = grepl(pattern = "\\[rm\\]", dataset$item_description) %>% sum()
+
+cat(sprintf("Il y a %.0f mentions de [rm] dans les noms des produits et %.0f dans les descriptions.\n", 
+            n_rm_name, n_rm_description))
+
+# Remplacement
+dataset$name = gsub(pattern = "\\[rm\\]", replacement = "", dataset$name)
+dataset$item_description = gsub(pattern = "\\[rm\\]", replacement = "", dataset$item_description)
+```
+Vérifions que la suppression s'est faite correctement : 
+
+```{r}
+# Nombre de fois où "[rm]" apparait après correction
+n_rm_name = grepl(pattern = "\\[rm\\]", dataset$name) %>% sum()
+n_rm_description = grepl(pattern = "\\[rm\\]", dataset$item_description) %>% sum()
+
+cat(sprintf("Il y a %.0f mention de [rm] dans les noms des produits et %.0f dans les descriptions.\n", 
+            n_rm_name, n_rm_description))
+```
+
+### Quelques statistiques descriptives
+
+Quelle est la répartition des conditions des produits ?
+
+```{r}
+# Dataframe comptant l'état des produits
+n_articles_condition = dataset %>%
+  group_by(item_condition_id) %>%
+  summarise(effectif = n()) %>%
+  ungroup()
+
+# Graphique
+ggplot(n_articles_condition, aes(x = item_condition_id, y = effectif)) + 
+  geom_bar(stat = 'identity') + 
+  labs(title = "Répartition des produits par état",
+       x = "condition du produit", 
+       y = "nombre de produits") + 
+  theme_bw()
+
+```
+
+La très grande majorité des produits sont soit neufs (condition à 1), soit peu usés (condition à 2 et 3).
+
+Quelle est la répartition par cat2 ?
+
+```{r}
+# Dataframe comptant le nombre de produits par cat2
+n_articles_cat2 = dataset %>%
+  group_by(cat2) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) #pourcentage
+
+# Ordonne les levels
+n_articles_cat2$cat2 = factor(n_articles_cat2$cat2, 
+                              levels = n_articles_cat2$cat2[order(n_articles_cat2$effectif)])
+
+# Graphique en barre
+ggplot(n_articles_cat2, aes(x = cat2, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = "Nombre d'articles par catégorie 2",
+       x = "catégorie 2",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+```
+
+Deux sous-catégories (cat2) apparaissent comme prédominants : les produits relatifs aux smartphones et aux jeux vidéos, qui représentent plus de 70% des articles proposés.
+
+Quelle est la répartition par cat3 ?
+
+```{r}
+# Dataframe comptant le nombre de produits par cat3
+n_articles_cat3 = dataset %>%
+  group_by(cat3) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) %>% #pourcentage
+  arrange(-effectif) #nécessaire pour ne sélectionner que les premiers
+
+# Ordonne les levels
+n_articles_cat3$cat3 = factor(n_articles_cat3$cat3, 
+                              levels = n_articles_cat3$cat3[order(n_articles_cat3$effectif)])
+
+# Graphique en barre
+n_head = 15
+ggplot(n_articles_cat3 %>% head(n_head), aes(x = cat3, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = paste("Nombre d'articles pour les", n_head, "sous-catégories les plus fournies"),
+       x = "catégorie 3",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+```
+
+Les résultats sont cohérents avec ceux obtenus à partir de la catégorie 2 : ici, nous voyons que les sous-catégories les plus fournies sont les jeux et les accessoires des smartphones (à eux-deux, elles représentent plus de 40% des articles en électronique).
+
+Quelle est la structure des catégories ?
+
+```{r}
+structure_cat = dataset %>%
+  select(cat2, cat3) %>%
+  distinct() %>%
+  arrange(cat2, cat3)
+
+structure_cat 
+
+# Nombre de familles de catégories
+cat(sprintf("Il y a %.0f famille de catégories.\n", nrow(structure_cat)))
+
+# Nombre de modalités en cat2
+cat(sprintf("Il y a %.0f modalités de cat2 uniques.\n", dataset$cat2 %>% unique() %>% length()))
+
+# Nombre de modalités en cat3
+cat(sprintf("Il y a %.0f modalités de cat3 uniques.\n", dataset$cat3 %>% unique() %>% length()))
+```
+
+Nous retrouvons 58 familles de catégories (soit plus que les 51 modalités de **cat3**) car certaines proviennent de **cat2** différents comme la sous-catégorie *Other* qui est un enfant de 8 catégorie 2.
+
+Quelles sont les marques les plus fréquentes ?
+
+```{r}
+# Dataframe comptant le nombre de produits par marque
+n_articles_brand = dataset %>%
+  group_by(brand_name) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) %>% #pourcentage
+  arrange(-effectif) #nécessaire pour ne sélectionner que les premiers
+
+# Ordonne les levels
+n_articles_brand$brand_name = factor(n_articles_brand$brand_name, 
+                              levels = n_articles_brand$brand_name[order(n_articles_brand$effectif)])
+
+# Graphique en barre
+n_head = 10
+ggplot(n_articles_brand %>% head(n_head), aes(x = brand_name, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = paste("Nombre d'articles pour les", n_head, "marques les plus présentes"),
+       x = "marques",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+# Nombre de marques différentes
+cat(sprintf("Il y a %.0f marques différentes.\n", nrow(n_articles_brand)))
+
+```
+Un article sur deux n'a pas de marque ! Puis viennent les marques les plus présents dans les jeux vidéos ou les smartphones (logique!) comme Apple, Nintendo, Sony, Xbox et Samsung.
+
+Il convient de rassembler sous un même label les marques les moins présentes
+
+```{r}
+# Les marques les plus présentes (plus de 2.5% des articles en volume)
+marques_les_plus_presentes = n_articles_brand$brand_name[n_articles_brand$pct > 2.5]
+
+# Remplacement des noms des autres marques
+dataset$brand_name = ifelse(dataset$brand_name %in% marques_les_plus_presentes,
+                            dataset$brand_name,
+                            "other_brand")
+```
+
+Vérifions que l'agrégation s'est bien faite : 
+
+```{r}
+# Dataframe comptant le nombre de produits par marque après agrégation des petites marques
+n_articles_brand_afterAgreg = dataset %>%
+  group_by(brand_name) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) %>% #pourcentage
+  arrange(-effectif) #nécessaire pour ne sélectionner que les premiers
+
+# Ordonne les levels
+n_articles_brand_afterAgreg$brand_name = factor(n_articles_brand_afterAgreg$brand_name, 
+                                                levels = n_articles_brand_afterAgreg$brand_name[order(n_articles_brand_afterAgreg$effectif)])
+
+# Graphique en barre
+ggplot(n_articles_brand_afterAgreg, aes(x = brand_name, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = paste("Nombre d'articles pour les marques les plus présentes"),
+       x = "marques",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+# Nombre de marques différentes
+cat(sprintf("Il y a %.0f marques différentes.\n", nrow(n_articles_brand_afterAgreg)))
+```
+
+Quelle est la répartition des prix ?
+
+```{r}
+# Graphique
+ggplot(dataset, aes(x = price)) + 
+  geom_histogram() +
+  labs(title = "Répartition des prix",
+       x = "prix",
+       y = "") + 
+  theme_bw()
+
+# Etendue
+summary(dataset$price)
+
+```
+
+Nous constatons la présence d'une longue queue. En accord avec la métrique RMSLE et cette remarque, nous considérons le log du prix.  
+De plus, l'existence de produits vendus à un prix nul étant problématique, nous les retirons de l'étude.
+
+```{r}
+# Produits vendus à 0$
+dataset %>% filter(price <= 0) %>% head(5)
+
+cat(sprintf("Il y a %.0f articles dont le prix est inférieur à 0.\n", sum(dataset$price <= 0)))
+
+dataset = dataset %>% filter(price > 0)
+```
+
+
+
+```{r}
+# Création du log du prix
+dataset = dataset %>%
+  mutate(log_price = log(price + 1))
+
+# Histogramme du log des prix
+ggplot(dataset, aes(x = log_price)) + 
+  geom_histogram() +
+  labs(title = "Répartition des log des prix",
+       x = "log(prix+1)",
+       y = "") + 
+  theme_bw()
+
+# Etendue
+summary(dataset$log_price)
+```
+
+Quelle est la répartition des frais de port ?
+
+```{r}
+# Dataframe comptant le nombre de produits par payeur des frais d'expédition
+n_articles_shipping = dataset %>%
+  group_by(shipping) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup()
+
+# Mise en facteur de shipping
+n_articles_shipping$shipping = n_articles_shipping$shipping %>% as.factor()
+
+# Camembert
+ggplot(n_articles_shipping, aes(x = factor(1) , y = effectif, fill = shipping)) +
+  geom_bar(stat = 'identity', width = 1) +
+  labs(title = "Répartition des frais d'envoi",
+       x = "", 
+       y = "") +
+  coord_polar(theta = "y")
+```
+
+# Sauvegarde
+
+```{r}
+# Sauvegarde des données filtrées et corrigées
+fwrite(dataset, "./data/intermediate/dataset_electronics.csv", 
+       row.names = FALSE, quote = TRUE, sep = ";")
+```
+

@@ -1,0 +1,729 @@
+---
+title: "Analyse descriptive et data mining"
+author: "Mohamed Maftah (mohamed.maftah@polymtl.ca) & Mehdi Miah (mehdi.miah@gmail.com)"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  html_document:
+    df_print: kable
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+---
+
+**Descriptif** : sur le fichier des produits en 'Electronics', crée de nouvelles variables et recherche de l'information permettant de prédire le prix d'un article
+
+# Setup
+
+```{r setup, message = FALSE, warning = FALSE}
+
+# Suppression des variables
+rm(list = ls())
+
+# Chargement des librairies
+library(data.table) #pour fread
+library(knitr) #pour le notebook
+library(stringr) #pour l'analyse textuelle
+library(ggplot2)
+library(tm) #pour le text mining (Corpus et etc)
+library(wordcloud) #pour le nuage de mots
+library(tau) #pour les n-grams
+library(arules) #pour les règles d'association
+library(tidyr)
+library(dplyr)
+
+```
+
+# Ouverture du fichier
+
+
+```{r, message = FALSE}
+# Eléments considérés comme NA
+na_strings = c(NA, '', '.', ' ', '?')
+
+# Dataset au complet
+dataset = fread("./data/intermediate/dataset_electronics.csv", data.table = FALSE,
+                sep = ";", encoding = "UTF-8", na.strings = na_strings,
+                colClasses = c("integer", "character", "factor", "factor", "factor", "factor", 
+                               "numeric", "integer", "character", "logical", "numeric"))
+```
+
+```{r}
+head(dataset)
+```
+
+```{r}
+str(dataset)
+```
+
+# Statistiques descriptives numériques
+
+On reprend les statistiques et on les reéxécute sur les données totalement formatées et nettoyées.
+A partir de certains résultats, il sera possible de créer de nouvelles variables (features engineering).
+
+## Statistiques univariées
+
+Quelle est la répartition des conditions des produits ?
+
+```{r}
+# Dataframe comptant l'état des produits
+n_articles_condition = dataset %>%
+  group_by(item_condition_id) %>%
+  summarise(effectif = n()) %>%
+  ungroup()
+
+# Graphique
+ggplot(n_articles_condition, aes(x = item_condition_id, y = effectif)) + 
+  geom_bar(stat = 'identity') + 
+  labs(title = "Répartition des produits par état",
+       x = "condition du produit", 
+       y = "nombre de produits") + 
+  theme_bw()
+
+```
+
+La très grande majorité des produits sont soit neufs (condition à 1), soit peu usés (condition à 2 et 3).
+
+Quelle est la répartition par cat2 ?
+
+```{r}
+# Dataframe comptant le nombre de produits par cat2
+n_articles_cat2 = dataset %>%
+  group_by(cat2) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) #pourcentage
+
+# Ordonne les levels
+n_articles_cat2$cat2 = factor(n_articles_cat2$cat2, 
+                              levels = n_articles_cat2$cat2[order(n_articles_cat2$effectif)])
+
+# Graphique en barre
+ggplot(n_articles_cat2, aes(x = cat2, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = "Nombre d'articles par catégorie 2",
+       x = "catégorie 2",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+```
+
+Deux sous-catégories (cat2) apparaissent comme prédominants : les produits relatifs aux smartphones et aux jeux vidéos, qui représentent plus de 70% des articles proposés.
+
+Quelle est la répartition par cat3 ?
+
+```{r}
+# Dataframe comptant le nombre de produits par cat3
+n_articles_cat3 = dataset %>%
+  group_by(cat3) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) %>% #pourcentage
+  arrange(-effectif) #nécessaire pour ne sélectionner que les premiers
+
+# Ordonne les levels
+n_articles_cat3$cat3 = factor(n_articles_cat3$cat3, 
+                              levels = n_articles_cat3$cat3[order(n_articles_cat3$effectif)])
+
+# Graphique en barre
+n_head = 15
+ggplot(n_articles_cat3 %>% head(n_head), aes(x = cat3, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = paste("Nombre d'articles pour les", n_head, "sous-catégories les plus fournies"),
+       x = "catégorie 3",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+```
+
+Les résultats sont cohérents avec ceux obtenus à partir de la catégorie 2 : ici, nous voyons que les sous-catégories les plus fournies sont les jeux et les accessoires des smartphones (à eux-deux, elles représentent plus de 40% des articles en électronique).
+
+Quelle est la structure des catégories ?
+
+```{r}
+structure_cat = dataset %>%
+  select(cat2, cat3) %>%
+  distinct() %>%
+  arrange(cat2, cat3)
+
+structure_cat
+
+# Nombre de familles de catégories
+cat(sprintf("Il y a %.0f famille de catégories.\n", nrow(structure_cat)))
+
+# Nombre de modalités en cat2
+cat(sprintf("Il y a %.0f modalités de cat2 uniques.\n", dataset$cat2 %>% unique() %>% length()))
+
+# Nombre de modalités en cat3
+cat(sprintf("Il y a %.0f modalités de cat3 uniques.\n", dataset$cat3 %>% unique() %>% length()))
+```
+
+Nous retrouvons 58 familles de catégories (soit plus que les 51 modalités de **cat3**) car certaines proviennent de **cat2** différents comme la sous-catégorie *Other* qui est un enfant de 8 catégorie 2.
+
+Quelles sont les marques les plus fréquentes ?
+
+```{r}
+# Dataframe comptant le nombre de produits par marque après agrégation des petites marques
+n_articles_brand = dataset %>%
+  group_by(brand_name) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup() %>%
+  mutate(pct = 100 * effectif / sum(effectif)) %>% #pourcentage
+  arrange(-effectif) #nécessaire pour ne sélectionner que les premiers
+
+# Ordonne les levels
+n_articles_brand$brand_name = factor(n_articles_brand$brand_name, 
+                                                levels = n_articles_brand$brand_name[order(n_articles_brand$effectif)])
+
+# Graphique en barre
+ggplot(n_articles_brand, aes(x = brand_name, y = effectif)) +
+  geom_bar(stat = 'identity', fill = "white", color = "black") + 
+  labs(title = paste("Nombre d'articles pour les marques les plus présentes"),
+       x = "marques",
+       y = "nombre d'articles") + 
+  geom_text(size = 2, hjust = -0.1, aes(y = effectif, label = sprintf("%.1f%%", pct))) + 
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  theme_bw()
+
+# Nombre de marques différentes
+cat(sprintf("Il y a %.0f marques différentes.\n", nrow(n_articles_brand)))
+```
+
+Quelle est la répartition des prix ?
+
+```{r}
+# Histogramme du log des prix
+ggplot(dataset, aes(x = log_price)) + 
+  geom_histogram() +
+  labs(title = "Répartition des log des prix",
+       x = "log(prix+1)",
+       y = "") + 
+  theme_bw()
+
+# Etendue
+summary(dataset$log_price)
+```
+
+Quelle est la répartition des frais de port ?
+
+```{r}
+# Dataframe comptant le nombre de produits par payeur des frais d'expédition
+n_articles_shipping = dataset %>%
+  group_by(shipping) %>%
+  summarise(effectif = n()) %>% #nombre de produits
+  ungroup()
+
+# Mise en facteur de shipping
+n_articles_shipping$shipping = n_articles_shipping$shipping %>% as.factor()
+
+# Camembert
+ggplot(n_articles_shipping, aes(x = factor(1) , y = effectif, fill = shipping)) +
+  geom_bar(stat = 'identity', width = 1) +
+  labs(title = "Répartition des frais d'envoi",
+       x = "", 
+       y = "") +
+  coord_polar(theta = "y")
+```
+
+
+## Statistiques bivariées
+
+Quel est l'effet du catégorie 2 sur le prix ?
+
+```{r}
+# Prix médian par cat2
+prix_median_cat2 = dataset %>%
+  group_by(cat2) %>%
+  summarise(prix_median = log_price %>% median()) %>%
+  ungroup()
+
+# Ordonne les cat2 par prix médian
+dataset$cat2 = factor(dataset$cat2, 
+                      levels = prix_median_cat2$cat2[order(prix_median_cat2$prix_median)]) 
+
+# Boxplot par cat2
+ggplot(dataset, aes(x = cat2, y = log_price)) +
+  geom_boxplot() + 
+  labs(title = "Répartition des log des prix par catégorie 2",
+       x = "catégorie 2",
+       y = "log(prix+1)") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Les catégories les moins chers (en médiane) : *Media* et *Cell Phones & Accessories*
+Les catégories les plus chers (en médiane) : *Camera & Photography* et *Computers & Tablets*
+Les catégories avec le plus d'outliers : *Cell Phones & Accessories*, *Media* et *Video Games & Consoles*
+
+Quel est l'effet du catégorie 3 sur le prix ?
+```{r}
+# Prix médian par cat3
+prix_median_cat3 = dataset %>%
+  group_by(cat3) %>%
+  summarise(prix_median = log_price %>% median()) %>%
+  ungroup()
+
+# Ordonne les cat3 par prix médian
+dataset$cat3 = factor(dataset$cat3, 
+                      levels = prix_median_cat3$cat3[order(prix_median_cat3$prix_median)]) 
+
+# Boxplot par cat3
+ggplot(dataset, aes(x = cat3, y = log_price)) +
+  geom_boxplot() + 
+  labs(title = "Répartition des log des prix par catégorie 3",
+       x = "catégorie 3",
+       y = "log(prix+1)") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+Pas mal de variance dans chaque **cat3** : peut-être s'agit-il de produits mal classés ?
+
+
+
+Quel est l'effet de la marque sur le prix ?
+```{r}
+# Prix médian par marque
+prix_median_brand = dataset %>%
+  group_by(brand_name) %>%
+  summarise(prix_median = log_price %>% median()) %>%
+  ungroup()
+
+# Ordonne les brand_name par prix médian
+dataset$brand_name = factor(dataset$brand_name, 
+                      levels = prix_median_brand$brand_name[order(prix_median_brand$prix_median)]) 
+
+# Boxplot par brand_name
+ggplot(dataset, aes(x = brand_name, y = log_price)) +
+  geom_boxplot() + 
+  labs(title = "Répartition des log des prix par marque",
+       x = "marque",
+       y = "log(prix+1)") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+Le fait de ne pas avoir de marque rend le produit moins cher : par exemple un accessoire ?
+A l'opposée, une marque autre que les 5 cités, entraîne une hausse des prix : par exemple Bose, Dr Dre, ...
+
+
+Quel est l'effet du condition du produit sur le prix ?
+```{r}
+# Boxplot par condition
+ggplot(dataset, aes(x = item_condition_id, y = log_price)) +
+  geom_boxplot() + 
+  labs(title = "Répartition des log des prix par condition",
+       x = "condition",
+       y = "log(prix+1)") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+En médiane : plus le produit est d'occasion / usé, plus il cher !! Résultat étrange ! 
+Cela s'explique peut-être par le fait qu'on mettra plus facilement un ordinateur d'occasion en vente (donc relativement cher) qu'un accessoire d'occasion. Bref, pour un produit d'occasion, seuls les produits relativement chers valent la peine d'être vendus.
+
+Regardons cela de plus près en regardant pour chaque **cat3** la part de produits d'occasion et le prix median. Notre hypothèse : plus un catégorie 3 voit de produits d'occasion (en proportion), plus il s'agit de produits chers.
+
+```{r}
+# Part de produits d'occasion par cat3
+part_occasion_cat3 = dataset %>%
+  mutate(est_occasion = item_condition_id != 1) %>%
+  group_by(est_occasion, cat3) %>%
+  summarise(effectif = n()) %>% #pour chaque cat3, on a le nombre de produits neufs et d'occasion
+  ungroup() %>%
+  group_by(cat3) %>% #on va calculer la part d'occasion
+  mutate(pct = effectif / sum(effectif)) %>%
+  ungroup() %>%
+  filter(est_occasion) %>% # on ne conserve que le taux de produits d'occasion et non celui des produits neufs
+  select(-est_occasion)
+
+# Statistiques par cat3
+stat_cat3 = dataset %>%
+  group_by(cat3) %>%
+  summarise(prix_median = median(log_price)) %>%
+  ungroup() %>%
+  left_join(part_occasion_cat3, by = "cat3")
+
+# Graphique où chaque point représente un cat3
+ggplot(stat_cat3, aes(x = pct, y = prix_median)) + 
+  geom_point(aes(size = effectif)) + 
+  geom_text(size = 2, vjust = -1, aes(x = pct, y = prix_median, label = cat3)) + 
+  labs(title = "Part de produits d'occasion, volume et prix médian par catégorie 3",
+       x = "part de produits d'occasion",
+       y = "prix médian") + 
+  theme_bw()
+
+```
+
+Il existe bien une corrélation positive entre part de produits d'occasion et prix de vente.
+Rajoutons cette variable dans la base de données.
+
+```{r}
+# Rajout de la part de produits d'occasion par cat3
+dataset = dataset %>%
+  left_join(part_occasion_cat3 %>% select(-effectif), by = "cat3")
+```
+
+
+Refaisons cette étude avec les catégories 2 : 
+
+```{r}
+# Part de produits d'occasion par cat2
+part_occasion_cat2 = dataset %>%
+  mutate(est_occasion = item_condition_id != 1) %>%
+  group_by(est_occasion, cat2) %>%
+  summarise(effectif = n()) %>% #pour chaque cat2, on a le nombre de produits neufs et d'occasion
+  ungroup() %>%
+  group_by(cat2) %>% #on va calculer la part d'occasion
+  mutate(pct = effectif / sum(effectif)) %>%
+  ungroup() %>%
+  filter(est_occasion) %>% # on ne conserve que le taux de produits d'occasion et non celui des produits neufs
+  select(-est_occasion)
+
+# Statistiques par cat2
+stat_cat2 = dataset %>%
+  group_by(cat2) %>%
+  summarise(prix_median = median(log_price)) %>%
+  ungroup() %>%
+  left_join(part_occasion_cat2, by = "cat2")
+
+# Graphique où chaque point représente un cat3
+ggplot(stat_cat2, aes(x = pct, y = prix_median)) + 
+  geom_point(aes(size = effectif)) + 
+  geom_text(size = 2, vjust = -1, aes(x = pct, y = prix_median, label = cat2)) + 
+  labs(title = "Part de produits d'occasion, volume et prix médian par catégorie 2",
+       x = "part de produits d'occasion",
+       y = "prix médian") + 
+  theme_bw()
+
+```
+Le résultat est semblable et fait ressortir les produits en *Video Games & Consoles* et en *Media*.
+En effet, par rapport à leur prix de vente médian, ces produits sont trop souvent vendus en occasion. Il s'agit vraisemblablement de produits qui font face à une concurrence dématérialisée. En effet, on devrait vendre moins d'occasion, donc plus de neufs. Or les produits neufs de ces deux catégories sont majoritairement vendus sur Steam ou sur Netflix. Le site de vente communautaire n'est alors plus en capacité de concurrencer ces vendeurs. De ce fait, les vendeurs ne vendent plus des produits neufs de ces types sur ce site.
+
+Rajoutons le fait que le **cat2** soit concurrencés par des produits dématérialisés : 
+
+```{r}
+# Listes des catégories 2 concurrencés par des produits dématérialisés
+list_cat2_dematerialise = c("Media", "Video Games & Consoles") 
+
+dataset = dataset %>%
+  mutate(cat2_dematerialise = cat2 %in% list_cat2_dematerialise)
+```
+
+
+Quel est l'effet des frais de port sur le prix ?
+```{r}
+# Boxplot par shipping
+ggplot(dataset, aes(x = shipping, y = log_price, group = shipping)) +
+  geom_boxplot() + 
+  labs(title = "Répartition des log des prix par shipping",
+       x = "shipping",
+       y = "log(prix+1)") + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+
+
+```
+
+Avec ce niveau d'agrégation, on ne peut pas trop en tirer quelque chose (cf paradoxe de Simpson). Refaisons le même graphique par catégorie 2, voire catégorie 3.
+
+```{r fig.height=8, fig.width=10}
+# Boxplot par shipping par cat2
+ggplot(dataset, aes(x = shipping, y = log_price, group = shipping)) +
+  geom_boxplot() + 
+  labs(title = "Répartition des log des prix par shipping",
+       x = "shipping",
+       y = "log(prix+1)") + 
+  facet_wrap(~ cat2) + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+
+
+```
+
+# Text mining
+
+Quel est l'effet des majuscules ?
+
+```{r}
+# Pour chaque produit, on compte le nombre de caractères en minuscule et en majuscule, puis le ratio
+name_maj = dataset %>%
+  select(name, log_price) %>%
+  mutate(n_chars_maj = sapply(str_match_all(name, "[A-Z]"), length),
+         n_chars_min = sapply(str_match_all(name, "[a-z]"), length)) %>%
+  mutate(ratio_maj_min = round(n_chars_maj/n_chars_min, 0)) #on arrondit por grouper dessus
+```
+
+On regarde le prix médian par niveau de ratio, arrondi à l'unité.
+
+```{r}
+# Groupe par ratio arrondi
+prix_median_ratio_maj_min_name = name_maj %>%
+  group_by(ratio_maj_min) %>%
+  summarise(effectif = n(), 
+            prix_median = median(log_price)) %>%
+  ungroup()
+
+# Graphique par ratio arrondi
+ggplot(prix_median_ratio_maj_min_name, aes(x = ratio_maj_min, y = prix_median)) + 
+  geom_line() + 
+  geom_point(aes(size = effectif)) +
+  labs(title = "Répartition des prix par ratio de MAJ/min dans le nom du produit",
+       x = "ratio MAJ/min", 
+       y = "log(prix+1)") + 
+  theme_bw()
+```
+
+De même dans la description : 
+
+```{r}
+# Pour chaque produit, on compte le nombre de caractères en minuscule et en majuscule, puis le ratio
+description_maj = dataset %>%
+  select(item_description, log_price) %>%
+  mutate(n_chars_maj = sapply(str_match_all(item_description, "[A-Z]"), length),
+         n_chars_min = sapply(str_match_all(item_description, "[a-z]"), length)) %>%
+  mutate(ratio_maj_min = round(n_chars_maj/n_chars_min, 0)) #on arrondit por grouper dessus
+```
+
+On regarde le prix médian par niveau de ratio, arrondi à l'unité.
+
+```{r}
+# Groupe par ratio arrondi
+prix_median_ratio_maj_min_description = description_maj %>%
+  group_by(ratio_maj_min) %>%
+  summarise(effectif = n(), 
+            prix_median = median(log_price)) %>%
+  ungroup()
+
+# Graphique par ratio arrondi
+ggplot(prix_median_ratio_maj_min_description, aes(x = ratio_maj_min, y = prix_median)) + 
+  geom_line() + 
+  geom_point(aes(size = effectif)) +
+  labs(title = "Répartition des prix par ratio de MAJ/min dans la description du produit",
+       x = "ratio MAJ/min", 
+       y = "log(prix+1)") + 
+  theme_bw()
+```
+
+
+Il ne semble pas a priori avoir un effet de la casse.
+
+## Nuage de mots
+
+```{r}
+# Inspiré de : 
+# http://www.sthda.com/french/wiki/text-mining-et-nuage-de-mots-avec-le-logiciel-r-5-etapes-simples-a-savoir
+# https://datascienceplus.com/building-wordclouds-in-r/
+# https://www.r-bloggers.com/24-days-of-r-day-11/ (n-grams avec <tau>)
+
+# Création du corpus de noms de produits
+corpus_name = Corpus(VectorSource(dataset$name) ,list(language = "english"))
+corpus_name = tm_map(corpus_name, tolower)
+corpus_name = tm_map(corpus_name, removePunctuation)
+corpus_name = tm_map(corpus_name, stripWhitespace)
+
+# Suppression des mots stopwords
+myStopwords = c(stopwords('english'))
+#corpus_name = tm_map(corpus_name, removeWords, myStopwords)
+
+# Nuage de mots
+wordcloud(corpus_name, max.words = 100, random.order = FALSE, min.freq = 10, colors = brewer.pal(8, "Dark2"))
+```
+
+```{r}
+# Inspiré de : 
+# http://www.sthda.com/french/wiki/text-mining-et-nuage-de-mots-avec-le-logiciel-r-5-etapes-simples-a-savoir
+# https://datascienceplus.com/building-wordclouds-in-r/
+# https://www.r-bloggers.com/24-days-of-r-day-11/ (n-grams avec <tau>)
+
+# Création du corpus de descriptions de produits
+corpus_description = Corpus(VectorSource(dataset$item_description) ,list(language = "english"))
+corpus_description = tm_map(corpus_description, tolower)
+corpus_description = tm_map(corpus_description, removePunctuation)
+corpus_description = tm_map(corpus_description, stripWhitespace)
+
+# Suppression des mots stopwords
+myStopwords = c(stopwords('english'))
+#corpus_description = tm_map(corpus_description, removeWords, myStopwords)
+
+# Nuage de mots
+wordcloud(corpus_description, max.words = 100, random.order = FALSE, min.freq = 10, colors = brewer.pal(8, "Dark2"))
+```
+
+Faut-il laisser les for et les with ?
+TODO : à avoir
+TODO : bigrams / trigrams
+TODO : lemmatiser ?
+
+### Vue d'ensemble par variable textuelle
+
+Affichons les mots les plus utilsés dans les noms des produits.
+
+```{r}
+freqwords_name = textcnt(corpus_name, n = 1, method = "string")
+freqwords_name = freqwords_name[order(freqwords_name, decreasing = TRUE)]
+freqwords_name[1:50]
+```
+
+Affichons les mots les plus utilisés dans les descriptions des produits.
+
+```{r}
+freqwords_description = textcnt(corpus_description, n = 1, method = "string")
+freqwords_description = freqwords_description[order(freqwords_description, decreasing = TRUE)]
+freqwords_description[1:50]
+```
+
+### Bigrams
+
+A voir si faisable
+
+## Mots et catégories de prix
+
+On remarque que les mots les plus utilisés sont les noms de produits. Quels sont les produits valorisés et les autres ?
+On regroupe par catégorie 3, et par tranche de prix. Ensuite, on fait un nuage de mots pour déterminer les mots "positifs" des mots "négatifs"
+
+```{r}
+dataset_words = dataset %>%
+  mutate(sentence = name) %>%
+  select(sentence, cat2, log_price, shipping, item_condition_id) %>%
+  group_by(cat2, shipping) %>%
+  mutate(quant = cut(x      = log_price, 
+                     breaks = quantile(log_price, probs = c(0, 0.33, 0.67, 1)),
+                     include.lowest = TRUE,
+                     labels = c("Cheap", "Moderate", "Expensive")
+                     )
+         ) %>%
+  ungroup()
+
+#Check
+dataset_words$quant %>% unique()
+
+```
+
+Quels sont les mots employés dans les produits chers ?
+
+```{r}
+# Création du corpus des produits chers
+corpus_expensive = Corpus(VectorSource(dataset_words$sentence[dataset_words$quant == "Expensive"]),
+                          list(language = "english"))
+corpus_expensive = tm_map(corpus_expensive, tolower)
+corpus_expensive = tm_map(corpus_expensive, removePunctuation)
+corpus_expensive = tm_map(corpus_expensive, stripWhitespace)
+
+# Suppression des mots stopwords
+myStopwords = c(stopwords('english'))
+corpus_expensive = tm_map(corpus_expensive, removeWords, myStopwords)
+
+# Nuage de mots
+wordcloud(corpus_expensive, max.words = 100, random.order = FALSE, 
+          min.freq = 10, colors = brewer.pal(8, "Dark2"))
+```
+
+Où est-ce qu'on trouve le mot apple ? ou iphone ?
+
+```{r}
+# Calcul de la part de produit Iphone et Case dans chaque cat3
+localisation_iphone_case = dataset %>%
+  mutate(a_iphone = grepl(pattern = "iphone", x = tolower(name)),
+         a_case = grepl(pattern = "case", x = tolower(name))) %>%
+  group_by(cat3) %>%
+  summarise(pct_iphone = mean(a_iphone),
+            pct_case = mean(a_case)) %>%
+  ungroup()
+
+# Graphique en barre
+ggplot(localisation_iphone_case, aes(x = pct_iphone, y = pct_case)) + 
+  geom_point() + 
+  geom_text(size = 2, vjust = -1, aes(label = cat3)) + 
+  labs(title = "Part de produits de type iPhone et case par cat3",
+       x = "part de produits iPhone",
+       y = "part de produits case") + 
+  theme_bw()
+```
+
+
+Quels sont les mots employés dans les produits à prix modéré ?
+
+```{r}
+# Création du corpus des produits à prix modéré
+corpus_moderate = Corpus(VectorSource(dataset_words$sentence[dataset_words$quant == "Moderate"]),
+                          list(language = "english"))
+corpus_moderate = tm_map(corpus_moderate, tolower)
+corpus_moderate = tm_map(corpus_moderate, removePunctuation)
+corpus_moderate = tm_map(corpus_moderate, stripWhitespace)
+
+# Suppression des mots stopwords
+myStopwords = c(stopwords('english'))
+corpus_moderate = tm_map(corpus_moderate, removeWords, myStopwords)
+
+# Nuage de mots
+wordcloud(corpus_moderate, max.words = 100, random.order = FALSE, 
+          min.freq = 10, colors = brewer.pal(8, "Dark2"))
+```
+
+Quels sont les mots employés dans les produits à prix bas ?
+
+```{r}
+# Création du corpus des produits à prix bas
+corpus_cheap = Corpus(VectorSource(dataset_words$sentence[dataset_words$quant == "Cheap"]),
+                          list(language = "english"))
+corpus_cheap = tm_map(corpus_cheap, tolower)
+corpus_cheap = tm_map(corpus_cheap, removePunctuation)
+corpus_cheap = tm_map(corpus_cheap, stripWhitespace)
+
+# Suppression des mots stopwords
+myStopwords = c(stopwords('english'))
+corpus_cheap = tm_map(corpus_cheap, removeWords, myStopwords)
+
+# Nuage de mots
+wordcloud(corpus_cheap, max.words = 100, random.order = FALSE, 
+          min.freq = 10, colors = brewer.pal(8, "Dark2"))
+```
+
+## Règles d'association
+
+Il faut déterminer quel mot implique "Expensive" ou "Cheap"
+
+```{r}
+# Matrice Documents x Terms
+ndocs = length(corpus_name)
+minDocFreq = ndocs * 0.001
+maxDocFreq = ndocs * 1
+
+myDtmUnigram = DocumentTermMatrix(corpus_name, control = list(bounds = list(global = c(minDocFreq,maxDocFreq)),
+                                                              weighting = "weightBin"))
+
+myDtmUnigram
+
+m = as.matrix(myDtmUnigram)
+m = data.frame( m > 0)
+dim(m)
+
+
+```
+
+```{r}
+m$quant = dataset_words$quant
+```
+
+```{r}
+trans = as(m, "transactions")
+summary(trans)
+
+quant_family = paste0("quant=", unique(m$quant))
+
+rules = apriori(trans, 
+                parameter = list(target = "rules", support = 0.0001, confidence= 0.8, maxlen = 2),
+                appearance = list(rhs = c(quant_family))
+)
+```
+
+```{r}
+inspect(sort(rules, by = "confidence"))
+```
+
+
+
