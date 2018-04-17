@@ -657,20 +657,21 @@ On remarque que les mots les plus utilisés sont les noms de produits. Quels son
 On regroupe par catégorie 3, et par tranche de prix. Ensuite, on fait un nuage de mots pour déterminer les mots "positifs" des mots "négatifs"
 
 ```{r}
-dataset_words = dataset %>%
-  mutate(sentence = name) %>%
-  select(sentence, cat2, log_price, shipping, item_condition_id) %>%
-  group_by(cat2, shipping) %>%
+# On crée une nouvelle variable qui indique si le produit fait partie des produits chers ou peu chers
+
+# Pour identifier les produits (très) chers es autres, il est nécessaire de connaitre la fonction de répartition des prix, pour voir à partir de quel quantile les prix explosent
+quantile(dataset$price, probs = seq(from = 0, to = 1, by = 0.05))
+
+# Il n'y a pas de cut précis à prendre. On y va au doigt mouillé : 25%-50%-75%
+# On cré 3 catégories de prix sur l'ensemble des produits
+dataset = dataset %>%
+  mutate(sentence = paste(name, brand_name)) %>%
   mutate(quant = cut(x      = log_price, 
                      breaks = quantile(log_price, probs = c(0, 0.25, 0.75, 1)),
                      include.lowest = TRUE,
                      labels = c("Cheap", "Moderate", "Expensive")
                      )
-         ) %>%
-  ungroup()
-
-#Check
-dataset_words$quant %>% unique()
+         )
 
 ```
 
@@ -678,7 +679,7 @@ Quels sont les mots employés dans les produits chers ?
 
 ```{r}
 # Création du corpus des produits chers
-corpus_expensive = Corpus(VectorSource(dataset_words$sentence[dataset_words$quant == "Expensive"]),
+corpus_expensive = Corpus(VectorSource(dataset$sentence[dataset$quant == "Expensive"]),
                           list(language = "english"))
 corpus_expensive = tm_map(corpus_expensive, tolower)
 corpus_expensive = tm_map(corpus_expensive, removePunctuation)
@@ -720,7 +721,7 @@ Quels sont les mots employés dans les produits à prix modéré ?
 
 ```{r}
 # Création du corpus des produits à prix modéré
-corpus_moderate = Corpus(VectorSource(dataset_words$sentence[dataset_words$quant == "Moderate"]),
+corpus_moderate = Corpus(VectorSource(dataset$sentence[dataset$quant == "Moderate"]),
                           list(language = "english"))
 corpus_moderate = tm_map(corpus_moderate, tolower)
 corpus_moderate = tm_map(corpus_moderate, removePunctuation)
@@ -739,7 +740,7 @@ Quels sont les mots employés dans les produits à prix bas ?
 
 ```{r}
 # Création du corpus des produits à prix bas
-corpus_cheap = Corpus(VectorSource(dataset_words$sentence[dataset_words$quant == "Cheap"]),
+corpus_cheap = Corpus(VectorSource(dataset$sentence[dataset$quant == "Cheap"]),
                           list(language = "english"))
 corpus_cheap = tm_map(corpus_cheap, tolower)
 corpus_cheap = tm_map(corpus_cheap, removePunctuation)
@@ -760,34 +761,38 @@ Il faut déterminer quel mot implique "Expensive" ou "Cheap"
 
 ```{r}
 # Matrice Documents x Terms
-ndocs = length(corpus_name)
-minDocFreq = ndocs * 0.001
-maxDocFreq = ndocs * 1
 
-myDtmUnigram = DocumentTermMatrix(corpus_name, control = list(bounds = list(global = c(minDocFreq,maxDocFreq)),
+# On réexploite le corpus crée à partir des noms des produits
+ndocs = length(corpus_name)
+
+# Suppression des mots rares de la matrice
+## On supprime les mots rares poué éviter que la matrice n'explose en mémoire
+min_support = 0.001
+minDocFreq = ndocs * min_support
+
+myDtmUnigram = DocumentTermMatrix(corpus_name, control = list(bounds = list(global = c(minDocFreq,ndocs)),
                                                               weighting = "weightBin"))
 
-myDtmUnigram
+m = as.matrix(myDtmUnigram) #mise en matrice
+m = data.frame( m > 0) #binarisation
+dim(m) #le nombre de colonne indique le nombre de mots
 
-m = as.matrix(myDtmUnigram)
-m = data.frame( m > 0)
-dim(m)
-
-
+# On rajoute la colonne indiquant la catégorie de prix
+m$quant = dataset$quant
 ```
 
 ```{r}
-m$quant = dataset_words$quant
-```
-
-```{r}
+# On doit une matrice totalement binaire (la variable quant est catégorielle)
 trans = as(m, "transactions")
 summary(trans)
 
+# On souhaite les règles qui implique quant=Cheap ou quant=Expensive
+# En effet, Moderate comprend 50% des données...
 quant_family = paste0("quant=", unique(m$quant))
+quant_family = setdiff(quant_family, "quant=Moderate")
 
 rules = apriori(trans, 
-                parameter = list(target = "rules", support = 0.0001, confidence= 0.8, maxlen = 2),
+                parameter = list(target = "rules", support = 0.001, confidence = 0.8, maxlen = 4),
                 appearance = list(rhs = c(quant_family))
 )
 ```
