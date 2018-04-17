@@ -24,6 +24,7 @@ library(data.table) #pour fread
 library(knitr) #pour le notebook
 library(stringr) #pour l'analyse textuelle
 library(ggplot2)
+library(ggrepel) #pour geom_text_repel
 library(tm) #pour le text mining (Corpus et etc)
 library(wordcloud) #pour le nuage de mots
 library(tau) #pour les n-grams
@@ -325,6 +326,8 @@ ggplot(dataset, aes(x = item_condition_id, y = log_price)) +
 En médiane : plus le produit est d'occasion / usé, plus il cher !! Résultat étrange ! 
 Cela s'explique peut-être par le fait qu'on mettra plus facilement un ordinateur d'occasion en vente (donc relativement cher) qu'un accessoire d'occasion. Bref, pour un produit d'occasion, seuls les produits relativement chers valent la peine d'être vendus.
 
+TODO : refaire la stat par cat3 => montrer quu'il existe des produits mal classés
+
 Regardons cela de plus près en regardant pour chaque **cat3** la part de produits d'occasion et le prix median. Notre hypothèse : plus un catégorie 3 voit de produits d'occasion (en proportion), plus il s'agit de produits chers.
 
 ```{r}
@@ -350,7 +353,7 @@ stat_cat3 = dataset %>%
 # Graphique où chaque point représente un cat3
 ggplot(stat_cat3, aes(x = pct, y = prix_median)) + 
   geom_point(aes(size = effectif)) + 
-  geom_text(size = 2, vjust = -1, aes(x = pct, y = prix_median, label = cat3)) + 
+  geom_text_repel(size = 2, vjust = -1, aes(x = pct, y = prix_median, label = cat3)) + 
   labs(title = "Part de produits d'occasion, volume et prix médian par catégorie 3",
        x = "part de produits d'occasion",
        y = "prix médian") + 
@@ -443,6 +446,68 @@ ggplot(dataset, aes(x = shipping, y = log_price, group = shipping)) +
 
 
 ```
+
+Ce résultat est étrange : shipping = 1 signifie que c'est le vendeur qui paie les frais d'expédition. A priori, si c'est lui qui les paie, le prix total devrait être plus élevé ... Sauf s'il y a effet croisé entre **cat2** et **shipping** ...
+
+Vérifions cela : quelle est la part de produits pré-payés par **cat2** ?
+
+```{r}
+# Part de produits dont les frais d'expédition sont payés par le vendeur par catégorie 3
+part_shipping_cat3 = dataset %>%
+  group_by(cat3) %>%
+  summarise(part_shipping = mean(shipping)) %>%
+  ungroup()
+
+# Ordonne
+part_shipping_cat3$cat3 = factor(part_shipping_cat3$cat3, 
+                              levels = part_shipping_cat3$cat3[order(part_shipping_cat3$part_shipping)])
+
+# Diagramme en barre
+ggplot(part_shipping_cat3, aes(x = cat3, y = part_shipping)) + 
+  geom_bar(stat = 'identity') + 
+  labs(title = "Part de produits dont les frais d'expédition sont payés par le vendeur par catégorie 3",
+       x = "catégorie 3",
+       y = "part de produits sans frais d'expédition") + 
+  coord_flip() +
+  theme_bw()
+
+```
+
+Bof pas trop possible de voir ? Effet du prix ? de la condition ?
+
+```{r}
+# Stats sur les cat3
+stat_cat3 = dataset %>%
+  mutate(est_occasion = item_condition_id != 1) %>%
+  group_by(cat3) %>%
+  summarise(part_shipping = mean(shipping),
+            part_occasion = mean(est_occasion),
+            prix_median = median(log_price),
+            effectif = n()) %>%
+  ungroup()
+
+# Graphique shipping x prix
+ggplot(stat_cat3, aes(x = part_shipping, y = prix_median)) + 
+  geom_point(aes(size = effectif)) + 
+  geom_text(size = 2, vjust = -1, aes(label = cat3)) + 
+  labs(title = "Part de produits sans frais, prix et volume par catégorie 3",
+       x = "part de produits sans frais d'expédition",
+       y = "prix médian") + 
+  theme_bw()
+
+# Graphique shipping x occasion
+ggplot(stat_cat3, aes(x = part_shipping, y = part_occasion)) + 
+  geom_point(aes(size = effectif)) + 
+  geom_text(size = 2, vjust = -1, aes(label = cat3)) + 
+  labs(title = "Part de produits sans frais, d'occasion et volume par catégorie 3",
+       x = "part de produits sans frais d'expédition",
+       y = "part de produits d'occasion") + 
+  theme_bw()
+
+```
+
+
+
 
 # Text mining
 
@@ -578,7 +643,13 @@ freqwords_description[1:50]
 
 ### Bigrams
 
-A voir si faisable
+```{r}
+freqbigrams_name = textcnt(corpus_name, n = 2, method = "string")
+freqbigrams_name = freqbigrams_name[order(freqbigrams_name, decreasing = TRUE)]
+freqbigrams_name[1:50]
+```
+
+A voir si intégrable dans le dfm()
 
 ## Mots et catégories de prix
 
@@ -591,7 +662,7 @@ dataset_words = dataset %>%
   select(sentence, cat2, log_price, shipping, item_condition_id) %>%
   group_by(cat2, shipping) %>%
   mutate(quant = cut(x      = log_price, 
-                     breaks = quantile(log_price, probs = c(0, 0.33, 0.67, 1)),
+                     breaks = quantile(log_price, probs = c(0, 0.25, 0.75, 1)),
                      include.lowest = TRUE,
                      labels = c("Cheap", "Moderate", "Expensive")
                      )
@@ -722,7 +793,7 @@ rules = apriori(trans,
 ```
 
 ```{r}
-inspect(sort(rules, by = "confidence"))
+arules::inspect(sort(rules, by = "confidence"))
 ```
 
 

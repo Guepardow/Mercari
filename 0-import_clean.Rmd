@@ -161,7 +161,7 @@ Traitons les variables impactées :
 
 - 1 observation n'a pas de nom : nous la laissons telle quelle ; 
 - 10 observations ne contiennent pas de description : nous les traitons en les remplaçants par l'indicateur "No description yet" ; 
-- 62629 observations n'ont pas de marque : a priori, les produits tels que les accessoires n'ont pas de marque. Ainsi, l'absence de donnée concernant la marque est en soit une information qu'il convient de conserver. Pour cela, nous remplaçons les valeurs manquantes par "brand_missing".
+- 62629 observations n'ont pas de marque : a priori, les produits tels que les accessoires n'ont pas de marque. Ainsi, l'absence de donnée concernant la marque est en soit une information qu'il convient de conserver. Pour cela, nous remplaçons les valeurs manquantes par "brandMissing".
 
 Regardons de plus près la dizaine d'observations avec soit un nom soit une description manquante : 
 
@@ -176,13 +176,14 @@ obs_with_missing_brand_or_description
 
 ```{r}
 # Lorsque la marque est manquante, on met une valeur par défaut
-dataset$brand_name[is.na(dataset$brand_name)] = "brand_missing"
+dataset$brand_name[is.na(dataset$brand_name)] = "brandMissing"
+## Il ne faut pas de '_' au risque de perdre le sens lors de la tokenisation
 
 # Création d'une variable binaire qui permet de considérer l'effet de ne pas mettre de marque, ou bien d'un produit sans marque
-dataset$is_brand_missing = dataset$brand_name == "brand_missing" #boolean
+dataset$is_brand_missing = dataset$brand_name == "brandMissing" #boolean
 ```
 
-Normalement, lorsque la description est manquante, Kaggle mettait "No description yet"
+Normalement, lorsque la description est manquante, Kaggle mettait "No description yet".
 
 ```{r}
 # Nombre de produits explicitement sans description
@@ -196,10 +197,14 @@ cat(sprintf("Il y a %.0f articles sans description et référencés tel quels.\n
 
 ```{r}
 # Remplacement des NA dans les descriptions par un marqueur
-dataset$item_description[is.na(dataset$item_description)] = "No description yet"
+dataset$item_description[is.na(dataset$item_description)] = "NoDescriptionYet"
+
+# On remplace la valeur par défaut qui contient des underscores
+dataset$item_description[dataset$item_description == "No description yet"] = "NoDescriptionYet"
+
 
 # Vérification
-n_description_missing = sum(dataset$item_description == "No description yet")
+n_description_missing = sum(dataset$item_description == "NoDescriptionYet")
 
 cat(sprintf("Désormais, il y a %.0f articles sans description et référencés tel quels.\n", 
             n_description_missing))
@@ -379,7 +384,7 @@ marques_les_plus_presentes = n_articles_brand$brand_name[n_articles_brand$pct > 
 # Remplacement des noms des autres marques
 dataset$brand_name = ifelse(dataset$brand_name %in% marques_les_plus_presentes,
                             dataset$brand_name,
-                            "other_brand")
+                            "otherBrand")
 ```
 
 Vérifions que l'agrégation s'est bien faite : 
