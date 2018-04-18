@@ -1,0 +1,290 @@
+---
+title: "Prédiction des prix"
+author: "Mohamed Maftah (mohamed.maftah@polymtl.ca) & Mehdi Miah (mehdi.miah@gmail.com)"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  html_document:
+    df_print: kable
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+---
+
+**Descriptif** : sur le fichier des produits en 'Electronics', prédit le prix d'un produit
+
+# Setup
+
+```{r setup, message = FALSE, warning = FALSE}
+
+# Suppression des variables
+rm(list = ls())
+
+# Chargement des librairies
+library(data.table) #pour fread
+library(knitr) #pour le notebook
+library(ggplot2)
+library(tm) #pour le text mining (Corpus et etc)
+library(randomForest)
+library(tidyr)
+library(dplyr)
+
+```
+
+# Ouverture du fichier
+
+```{r, message = FALSE}
+# Eléments considérés comme NA
+na_strings = c(NA, '', '.', ' ', '?')
+
+# Dataset au complet
+dataset = fread("./data/intermediate/dataset_electronics.csv", data.table = FALSE,
+                sep = ";", encoding = "UTF-8", na.strings = na_strings,
+                colClasses = c("integer", "character", "factor", "factor", "factor", "factor", 
+                               "numeric", "integer", "character", "logical", "numeric"))
+```
+
+```{r}
+# Fonction RMSE d'erreur
+rmse = function(y_pred, y_true, na.rm = FALSE){
+  if(length(y_pred) != length(y_true)){
+    stop("Les deux vecteurs ne sont pas de même dimension !\n")
+  }else{
+    rmse = (mean((y_pred - y_true)**2, na.rm = na.rm)) ** (1/2)
+    return(rmse)
+  }
+  
+}
+```
+
+
+# Modèle de prédiction
+
+Pour évaluer les performances d'un modèle "complexe", il convient tout d'abord d'avoir une estimation du pouvoir prédictif de modèles plus simples. A partir de l'analyse des données, il s'est avéré que l'ensemble des variables présentes dans la base de données affectait le prix.
+
+## Modèle baseline
+
+Pour construire le modèle simple, nous proposons de nous baser uniquement sur les variables numériques et catégoriques : **cat3**, **shipping**, **item_condition_id** et **is_brand_missing**.
+Le modèle reposera sur le prix moyen dans le sous-groupe.
+
+```{r}
+# 10-fold cross validation
+## Compte tenu de la simplicité du modèle, il est possible dans ce cas de procéder à une 10 fold-CV pour évaluer la variance de l'erreur.
+list_folds = 1:10
+dataset$num_fold = sample(x = list_folds, replace = TRUE, size = nrow(dataset))
+```
+
+On crée une fonction qui va évaluer la prédiction sur chaque subset des données.
+
+```{r}
+# Fonction de prédiction
+predict_groupe = function(train, test){
+  
+  # Prix lorsqu'il n'y a pas d'exemple d'apprentissage
+  ## Va au final remplacer les NA issus de la jointure future
+  mean_log_price = train$log_price %>% mean()
+  
+  # Apprentissage sur la base de train à partir des catégories
+  price_cat = train %>%
+    group_by(cat3, is_brand_missing, item_condition_id, shipping) %>%
+    summarise(log_price_pred = log_price %>% mean()) %>%
+    ungroup()
+  
+  # Prédiction
+  predictions = test %>%
+    left_join(price_cat, by = c("item_condition_id", "cat3", "shipping", "is_brand_missing")) 
+  
+  # Remplace les NA par le prix moyen sur l'ensemble
+  predictions$log_price_pred[is.na(predictions$log_price_pred)] = mean_log_price
+  
+  return(predictions)
+}
+```
+
+Dès lors, il devient possible de faire les itérations pour prédire le prix.
+
+```{r}
+# Vecteur qui va conserver le score de chaque prédiction 
+vect_score = c()
+
+# On boucle sur les 
+for(f in list_folds){
+  
+  # Partitionnement : train / test
+  train = dataset %>%
+    filter(num_fold != f)
+  
+  test = dataset %>%
+    filter(num_fold == f)
+  
+  # Apprentissage
+  predictions = predict_groupe(train, test)
+
+  # Mesure de la performance
+  score_rmse = rmse(predictions$log_price, predictions$log_price_pred)
+  cat(sprintf("Fold %-8s Le score de prédiction est de %.3f.\n", f, score_rmse))
+  
+  # On rajoute le score de ce fold
+  vect_score = c(vect_score, score_rmse)
+  
+}
+
+# On mesure la variance de l'erreur
+cat(sprintf("Le score moyen de ce prédicteur est de %.3f +/- %.3f (à 95%%).\n",
+            mean(vect_score), 
+            2/sqrt(length(vect_score)) * sd(vect_score)
+            )
+    )
+```
+
+## Modèle de random forest
+
+Il nous faut un modèle capable de gérer des centaines de variables, avec de bons taux de prédictions, et capable de faire un "nettoyage automatique" des données. Pour cela, nous privilégions les modèles de forêts aléatoires sur les arbres de décision (moins bon en score), les régressions linéaires (plus sensibles au bruit), aux réseaux bayésiens et aux réseaux de neurones à une/deux couches.
+
+### Création de la matrice
+
+Il faut distinguer les noms des descriptions car la procédure de formatage n'est pas la même. La seule différence réside dans le fait qu'on ne retire pas les stopwords des noms.
+
+Une fois les deux matrices obtenuus, on les "collera" et on rajoutera les autres variables : **cat2**, **cat3**, **shipping**, **item_condition_id** et **brand_name** pour enfin prédire le prix.
+
+```{r}
+# Pour différencier l'origine des variables
+paste_var = function(x, var) paste(var, (strsplit(x, split = ' ') %>% unlist), sep="_", collapse=" ")
+
+# Création du corpus de noms de produits
+corpus_name = Corpus(VectorSource(dataset$name) ,list(language = "english"))
+corpus_name = tm_map(corpus_name, tolower)
+corpus_name = tm_map(corpus_name, removePunctuation)
+#corpus_name = tm_map(corpus_name, content_transformer(paste_var), var = "name")
+corpus_name = tm_map(corpus_name, stripWhitespace)
+
+# Création du corpus de descriptions de produits
+#corpus_description = Corpus(VectorSource(dataset$item_description) ,list(language = "english"))
+#corpus_description = tm_map(corpus_description, tolower)
+#corpus_description = tm_map(corpus_description, removePunctuation)
+
+#corpus_description = tm_map(corpus_description, content_transformer(paste_var), var = "desc")
+
+#myStopwords = paste("desc", c(stopwords('english')), sep = '_')
+#corpus_description = tm_map(corpus_description, removeWords, myStopwords)
+
+#corpus_description = tm_map(corpus_description, stripWhitespace)
+```
+
+Une fois les corpus obtenus, on crée les matrices.
+
+```{r}
+# Suppression des mots rares de la matrice
+ndocs = length(corpus_name)
+min_support = 0.001
+minDocFreq = ndocs * min_support 
+
+# Matrice Documents x Terms pour les noms des produits
+documentTerm_name = DocumentTermMatrix(corpus_name, control = list(bounds = list(global = c(minDocFreq,ndocs)),
+                                                              weighting = "weightBin"))
+mat_name = as.matrix(documentTerm_name) #mise en matrice
+mat_name = data.frame(mat_name > 0) #binarisation
+dim(mat_name) #le nombre de colonne indique le nombre de mots
+
+# Matrice Documents x Terms pour les descriptions des produits
+# documentTerm_description = DocumentTermMatrix(corpus_description, control = list(bounds = list(global = c(minDocFreq,ndocs)),
+#                                                                                  weighting = "weightBin"))
+
+#mat_description = as.matrix(documentTerm_description) #mise en matrice
+#mat_description = data.frame(mat_description > 0) #binarisation
+#dim(mat_description) #le nombre de colonne indique le nombre de mots
+
+# Append les deux matrices
+#mat_product = cbind(mat_name, mat_description) # on sépare les effets des mots dans le nom de ceux dans la description
+
+mat_product = mat_name
+
+
+```
+
+On rajoute les autres variables
+
+```{r}
+mat_product$cat2 = dataset$cat2
+mat_product$cat3 = dataset$cat3
+mat_product$brand_name = dataset$brand_name
+mat_product$shipping = dataset$shipping
+mat_product$item_condition_id = dataset$item_condition_id
+mat_product$log_price = dataset$log_price
+```
+
+On peut enfin faire la prédiction
+```{r}
+# Ensemble d'apprentissage
+training_rows = sample(c(TRUE, FALSE), 
+                       replace = TRUE, 
+                       size = nrow(mat_product), 
+                       prob = c(0.8, 0.2)) #80% vs 20% en test
+
+model_rf = randomForest(log_price ~ . , data = mat_product, subset = training_rows, ntree = 64)
+model_rf
+
+predict_rf = predict(model_rf, mat_product[!training_rows, ])
+
+sqrt(mean((predict_rf - mat_product[!training_rows, "log_price"])**2))
+```
+
+Avec cat2, cat3, brand_name, shipping, item_condition_id, name (low, punt, strip) => MSE_OOB = 0.292 & MSE_test = 0.287 <=> RMSE_test = 0.536
+```{r}
+save(model_rf, file = "model_rf.RData")
+```
+
+On regarde les résultats
+
+```{r}
+mean((predict_rf - mat_product[!training_rows, "log_price"])**2)
+
+# Importance des variables
+varImpPlot(model_rf)
+
+```
+
+## Cohérence du modèle
+
+Vérifions la cohérence du modèle
+
+```{r}
+# On crée de fausses données où une seule variable va changer
+## On pourra mesurer l'impact de celle ci, toute chose égale par ailleurs
+fake_dataset = mat_product[39, ]
+fake_dataset = fake_dataset[rep(1, each=10),]
+rownames(fake_dataset) = 1:10
+
+# shipping
+fake_dataset$shipping = as.integer(rownames(fake_dataset)) %% 2
+
+# item_condition_id
+fake_dataset$item_condition_id = (1 + (as.integer(rownames(fake_dataset)) %% 5)) %>% as.factor()
+
+
+```
+
+```{r}
+predict_fake = predict(model_rf, fake_dataset)
+
+```
+
+
+
+
+### Cohérence par rapport à shipping
+```{r}
+#Lecture des résultats
+fake_df = data.frame(shipping = fake_dataset$shipping,
+                     item_condition_id = fake_dataset$item_condition_id,
+                     predict = predict_fake)
+
+### Cohérence par rapport à shipping
+fake_df %>% arrange(item_condition_id)
+# 2 cohérents sur 5
+
+### Cohérence par rapport à item_condition_id
+fake_df %>% arrange(shipping, item_condition_id)
+# Pas cohérent
+```
+
+
